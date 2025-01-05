@@ -22,6 +22,19 @@
         #results {
             margin-top: 2rem;
         }
+        .platform-select {
+            margin: 1rem 0;
+            padding: 1rem;
+            border: 1px solid #dee2e6;
+            border-radius: 0.25rem;
+        }
+        .progress-info {
+            margin-top: 1rem;
+        }
+        .review-count {
+            font-weight: bold;
+            color: #0d6efd;
+        }
     </style>
 </head>
 <body>
@@ -35,6 +48,54 @@
                         <input type="text" class="form-control" id="keyword" required 
                                placeholder="请输入要搜索的酒店关键词">
                     </div>
+
+                    <!-- 平台选择 -->
+                    <div class="platform-select">
+                        <label class="form-label">选择搜索平台</label>
+                        <div class="row">
+                            <div class="col-md-4">
+                                <div class="form-check">
+                                    <input class="form-check-input" type="checkbox" value="ctrip" id="ctrip" checked>
+                                    <label class="form-check-label" for="ctrip">
+                                        携程旅行
+                                    </label>
+                                </div>
+                            </div>
+                            <div class="col-md-4">
+                                <div class="form-check">
+                                    <input class="form-check-input" type="checkbox" value="booking" id="booking">
+                                    <label class="form-check-label" for="booking">
+                                        Booking.com
+                                    </label>
+                                </div>
+                            </div>
+                            <div class="col-md-4">
+                                <div class="form-check">
+                                    <input class="form-check-input" type="checkbox" value="agoda" id="agoda">
+                                    <label class="form-check-label" for="agoda">
+                                        Agoda
+                                    </label>
+                                </div>
+                            </div>
+                            <div class="col-md-4">
+                                <div class="form-check">
+                                    <input class="form-check-input" type="checkbox" value="meituan" id="meituan">
+                                    <label class="form-check-label" for="meituan">
+                                        美团酒店
+                                    </label>
+                                </div>
+                            </div>
+                            <div class="col-md-4">
+                                <div class="form-check">
+                                    <input class="form-check-input" type="checkbox" value="fliggy" id="fliggy">
+                                    <label class="form-check-label" for="fliggy">
+                                        飞猪旅行
+                                    </label>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
                     <button type="submit" class="btn btn-primary" id="submitBtn">
                         开始搜索
                     </button>
@@ -42,6 +103,19 @@
 
                 <!-- 状态显示区域 -->
                 <div id="status" class="status-message" style="display: none;"></div>
+
+                <!-- 进度显示区域 -->
+                <div id="progress" class="progress-info" style="display: none;">
+                    <div class="card">
+                        <div class="card-body">
+                            <h5 class="card-title">搜索进度</h5>
+                            <div id="platformProgress"></div>
+                            <div class="mt-3">
+                                <small class="text-muted">已找到评论数：<span id="reviewCount" class="review-count">0</span></small>
+                            </div>
+                        </div>
+                    </div>
+                </div>
 
                 <!-- 结果显示区域 -->
                 <div id="results"></div>
@@ -52,8 +126,14 @@
     <script>
         const statusDiv = document.getElementById('status');
         const resultsDiv = document.getElementById('results');
+        const progressDiv = document.getElementById('progress');
+        const platformProgressDiv = document.getElementById('platformProgress');
+        const reviewCountSpan = document.getElementById('reviewCount');
         const submitBtn = document.getElementById('submitBtn');
         const form = document.getElementById('scrapeForm');
+
+        let searchInProgress = false;
+        let totalReviews = 0;
 
         function showStatus(message, type = 'info') {
             statusDiv.style.display = 'block';
@@ -67,75 +147,165 @@
                 <span class="loading"></span>
                 正在搜索...
             `;
-            showStatus(`
-                <div class="d-flex align-items-center">
-                    <span class="loading"></span>
-                    <span>正在搜索相关评论，请稍候...</span>
-                </div>
-            `, 'info');
+            progressDiv.style.display = 'block';
+            searchInProgress = true;
         }
 
         function resetForm() {
             submitBtn.disabled = false;
             submitBtn.innerHTML = '开始搜索';
+            searchInProgress = false;
         }
 
-        async function checkStatus() {
+        function updateProgress(platform, status, count = 0) {
+            const platformDiv = document.getElementById(`progress-${platform}`) || 
+                              createPlatformProgress(platform);
+            platformDiv.innerHTML = `
+                <div class="d-flex justify-content-between align-items-center mb-2">
+                    <span>${getPlatformName(platform)}</span>
+                    <span class="badge bg-${status === 'error' ? 'danger' : 'info'}">${status}</span>
+                </div>
+            `;
+            totalReviews += count;
+            reviewCountSpan.textContent = totalReviews;
+        }
+
+        function createPlatformProgress(platform) {
+            const div = document.createElement('div');
+            div.id = `progress-${platform}`;
+            div.className = 'mb-3';
+            platformProgressDiv.appendChild(div);
+            return div;
+        }
+
+        function getPlatformName(platform) {
+            const names = {
+                'ctrip': '携程旅行',
+                'booking': 'Booking.com',
+                'agoda': 'Agoda',
+                'meituan': '美团酒店',
+                'fliggy': '飞猪旅行'
+            };
+            return names[platform] || platform;
+        }
+
+        async function pollSearchStatus() {
+            if (!searchInProgress) return;
+
             try {
-                const response = await fetch('/api/test');
+                const response = await fetch('/search_status');
                 const data = await response.json();
-                return data.status === 'success';
+                
+                if (data.status === 'completed') {
+                    showStatus('搜索完成！', 'success');
+                    searchInProgress = false;
+                    displayResults(data.results);
+                } else if (data.status === 'in_progress') {
+                    // 更新每个平台的进度
+                    Object.entries(data.platform_status).forEach(([platform, status]) => {
+                        updateProgress(platform, status.status, status.review_count);
+                    });
+                    // 继续轮询
+                    setTimeout(pollSearchStatus, 2000);
+                }
             } catch (error) {
                 console.error('Status check failed:', error);
-                return false;
+                setTimeout(pollSearchStatus, 5000);
             }
+        }
+
+        function displayResults(results) {
+            if (!results || Object.keys(results).length === 0) {
+                resultsDiv.innerHTML = '<div class="alert alert-warning">未找到相关评论</div>';
+                return;
+            }
+
+            let html = '<div class="mt-4"><h4>搜索结果</h4>';
+            
+            Object.entries(results).forEach(([platform, platformResults]) => {
+                html += `
+                    <div class="card mb-3">
+                        <div class="card-header">${getPlatformName(platform)}</div>
+                        <div class="card-body">
+                            <p>找到 ${platformResults.length} 条评论</p>
+                            <div class="table-responsive">
+                                <table class="table">
+                                    <thead>
+                                        <tr>
+                                            <th>酒店名称</th>
+                                            <th>评论内容</th>
+                                            <th>评分</th>
+                                            <th>日期</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody>
+                `;
+
+                platformResults.forEach(review => {
+                    html += `
+                        <tr>
+                            <td>${review.hotel_name}</td>
+                            <td>${review.content}</td>
+                            <td>${review.score || 'N/A'}</td>
+                            <td>${review.date}</td>
+                        </tr>
+                    `;
+                });
+
+                html += `
+                                    </tbody>
+                                </table>
+                            </div>
+                        </div>
+                    </div>
+                `;
+            });
+
+            html += '</div>';
+            resultsDiv.innerHTML = html;
         }
 
         form.onsubmit = async (e) => {
             e.preventDefault();
             const keyword = document.getElementById('keyword').value.trim();
+            const selectedPlatforms = Array.from(document.querySelectorAll('input[type="checkbox"]:checked'))
+                                        .map(cb => cb.value);
 
             if (!keyword) {
                 showStatus('请输入搜索关键词', 'warning');
                 return;
             }
 
+            if (selectedPlatforms.length === 0) {
+                showStatus('请至少选择一个搜索平台', 'warning');
+                return;
+            }
+
             showLoading();
+            totalReviews = 0;
+            platformProgressDiv.innerHTML = '';
             resultsDiv.innerHTML = '';
 
             try {
-                // 首先检查API是否可用
-                const isAvailable = await checkStatus();
-                if (!isAvailable) {
-                    throw new Error('服务暂时不可用，请稍后再试');
-                }
-
-                // 发送搜索请求
                 const response = await fetch('/start_scraping', {
                     method: 'POST',
                     headers: {
                         'Content-Type': 'application/json',
                     },
-                    body: JSON.stringify({ keyword })
+                    body: JSON.stringify({ 
+                        keyword,
+                        platforms: selectedPlatforms
+                    })
                 });
 
                 const data = await response.json();
 
                 if (response.ok) {
-                    showStatus(`搜索请求已接收：${data.message}`, 'success');
-                    
-                    // 如果有搜索结果
-                    if (data.data && data.data.keyword) {
-                        resultsDiv.innerHTML = `
-                            <div class="mt-3">
-                                <h4>搜索结果</h4>
-                                <p>关键词: ${data.data.keyword}</p>
-                                <p>正在处理中，请稍候...</p>
-                            </div>
-                        `;
-                    }
+                    showStatus('搜索已开始，请等待结果...', 'info');
+                    pollSearchStatus();
                 } else {
                     showStatus(`搜索失败：${data.error}`, 'danger');
+                    resetForm();
                 }
             } catch (error) {
                 showStatus(`
@@ -146,7 +316,6 @@
                     3. 请求超时<br>
                     请稍后重试
                 `, 'danger');
-            } finally {
                 resetForm();
             }
         };
@@ -154,8 +323,9 @@
         // 页面加载时检查服务状态
         window.onload = async () => {
             try {
-                const isAvailable = await checkStatus();
-                if (isAvailable) {
+                const response = await fetch('/api/test');
+                const data = await response.json();
+                if (data.status === 'success') {
                     showStatus('系统已就绪，可以开始搜索', 'success');
                 } else {
                     showStatus('系统正在初始化，请稍候...', 'warning');
