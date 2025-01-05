@@ -12,7 +12,14 @@ search_status = {
     'is_searching': False,
     'platform_status': {},
     'results': {},
-    'start_time': None
+    'start_time': None,
+    'should_stop': False,  # 控制搜索停止
+    'target_count': 0,     # 目标评论数量
+    'current_count': 0,    # 当前评论数量
+    'date_range': {        # 日期范围
+        'start': None,
+        'end': None
+    }
 }
 
 # 配置日志
@@ -52,32 +59,58 @@ def get_search_status():
         'start_time': search_status['start_time']
     })
 
-def search_platform(platform, keyword):
-    """模拟在特定平台上搜索"""
+def search_platform(platform, keyword, target_count, date_range):
+    """在特定平台上搜索"""
     try:
         search_status['platform_status'][platform] = {
             'status': 'searching',
             'review_count': 0
         }
         
+        start_time = time.time()
+        max_search_time = 300  # 最大搜索时间5分钟
+        
         # 模拟搜索过程
-        time.sleep(5)  # 实际项目中替换为真实的爬取逻辑
-        
-        # 模拟找到一些评论
-        reviews = [
-            {
-                'hotel_name': f'测试酒店 {i}',
-                'content': f'这是一条来自{platform}的测试评论 {i}',
-                'score': 4.5,
-                'date': datetime.now().strftime('%Y-%m-%d')
+        for i in range(10):  # 分批次搜索
+            if search_status['should_stop'] or \
+               search_status['current_count'] >= target_count or \
+               time.time() - start_time > max_search_time:
+                break
+                
+            # 模拟找到一些评论
+            new_reviews = [
+                {
+                    'hotel_name': f'测试酒店 {i}',
+                    'content': f'这是一条来自{platform}的测试评论 {i}',
+                    'score': 4.5,
+                    'date': datetime.now().strftime('%Y-%m-%d'),
+                    'timestamp': datetime.now().isoformat()  # 用于实时显示
+                }
+                for i in range(3)
+            ]
+            
+            # 过滤日期范围
+            if date_range['start'] and date_range['end']:
+                new_reviews = [
+                    review for review in new_reviews
+                    if date_range['start'] <= review['date'] <= date_range['end']
+                ]
+            
+            if platform not in search_status['results']:
+                search_status['results'][platform] = []
+            
+            search_status['results'][platform].extend(new_reviews)
+            search_status['current_count'] += len(new_reviews)
+            search_status['platform_status'][platform] = {
+                'status': 'searching',
+                'review_count': len(search_status['results'][platform])
             }
-            for i in range(3)
-        ]
+            
+            time.sleep(1)  # 模拟搜索延迟
         
-        search_status['results'][platform] = reviews
         search_status['platform_status'][platform] = {
             'status': 'completed',
-            'review_count': len(reviews)
+            'review_count': len(search_status['results'][platform])
         }
         
     except Exception as e:
@@ -96,6 +129,11 @@ def start_scraping():
             
         keyword = data.get('keyword')
         platforms = data.get('platforms', [])
+        target_count = int(data.get('target_count', 100))  # 默认100条
+        date_range = {
+            'start': data.get('start_date'),
+            'end': data.get('end_date')
+        }
         
         if not keyword:
             return jsonify({'error': '关键词不能为空'}), 400
@@ -106,16 +144,20 @@ def start_scraping():
         # 重置搜索状态
         search_status.update({
             'is_searching': True,
+            'should_stop': False,
             'platform_status': {},
             'results': {},
-            'start_time': datetime.now().isoformat()
+            'start_time': datetime.now().isoformat(),
+            'target_count': target_count,
+            'current_count': 0,
+            'date_range': date_range
         })
         
         # 为每个平台启动搜索线程
         for platform in platforms:
             Thread(
                 target=search_platform,
-                args=(platform, keyword),
+                args=(platform, keyword, target_count, date_range),
                 daemon=True
             ).start()
         
@@ -128,6 +170,14 @@ def start_scraping():
     except Exception as e:
         logging.error(f"处理爬虫请求时出错: {str(e)}")
         return jsonify({'error': str(e)}), 500
+
+@app.route('/stop_scraping', methods=['POST'])
+def stop_scraping():
+    search_status['should_stop'] = True
+    return jsonify({
+        'status': 'success',
+        'message': '正在停止搜索...'
+    })
 
 @app.errorhandler(404)
 def not_found_error(error):

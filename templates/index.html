@@ -96,8 +96,30 @@
                         </div>
                     </div>
 
+                    <div class="mb-3">
+                        <label class="form-label">目标评论数量</label>
+                        <input type="number" class="form-control" id="targetCount" 
+                               value="100" min="1" max="1000">
+                    </div>
+
+                    <div class="mb-3">
+                        <label class="form-label">评论日期范围</label>
+                        <div class="row">
+                            <div class="col">
+                                <input type="date" class="form-control" id="startDate">
+                            </div>
+                            <div class="col">
+                                <input type="date" class="form-control" id="endDate">
+                            </div>
+                        </div>
+                    </div>
+
                     <button type="submit" class="btn btn-primary" id="submitBtn">
                         开始搜索
+                    </button>
+
+                    <button type="button" class="btn btn-danger ms-2" id="stopBtn" style="display: none;">
+                        停止搜索
                     </button>
                 </form>
 
@@ -119,6 +141,20 @@
 
                 <!-- 结果显示区域 -->
                 <div id="results"></div>
+
+                <!-- 添加实时结果显示区域 -->
+                <div id="liveResults" class="mt-3" style="display: none;">
+                    <div class="card">
+                        <div class="card-body">
+                            <h5 class="card-title">实时搜索结果</h5>
+                            <div class="progress mb-3">
+                                <div class="progress-bar" role="progressbar" style="width: 0%"></div>
+                            </div>
+                            <div class="live-results-container" style="height: 200px; overflow-y: auto; border: 1px solid #dee2e6; padding: 10px;">
+                            </div>
+                        </div>
+                    </div>
+                </div>
             </div>
         </div>
     </div>
@@ -131,6 +167,10 @@
         const reviewCountSpan = document.getElementById('reviewCount');
         const submitBtn = document.getElementById('submitBtn');
         const form = document.getElementById('scrapeForm');
+        const stopBtn = document.getElementById('stopBtn');
+        const liveResults = document.getElementById('liveResults');
+        const liveResultsContainer = document.querySelector('.live-results-container');
+        const progressBar = document.querySelector('.progress-bar');
 
         let searchInProgress = false;
         let totalReviews = 0;
@@ -154,7 +194,10 @@
         function resetForm() {
             submitBtn.disabled = false;
             submitBtn.innerHTML = '开始搜索';
+            stopBtn.style.display = 'none';
             searchInProgress = false;
+            progressBar.style.width = '0%';
+            progressBar.textContent = '';
         }
 
         function updateProgress(platform, status, count = 0) {
@@ -196,15 +239,40 @@
                 const response = await fetch('/search_status');
                 const data = await response.json();
                 
-                if (data.status === 'completed') {
+                if (data.status === 'completed' || data.current_count >= data.target_count) {
                     showStatus('搜索完成！', 'success');
                     searchInProgress = false;
+                    stopBtn.style.display = 'none';
                     displayResults(data.results);
                 } else if (data.status === 'in_progress') {
-                    // 更新每个平台的进度
+                    // 更新进度条
+                    const progress = (data.current_count / data.target_count) * 100;
+                    progressBar.style.width = `${Math.min(progress, 100)}%`;
+                    progressBar.textContent = `${Math.round(progress)}%`;
+
+                    // 更新平台状态
                     Object.entries(data.platform_status).forEach(([platform, status]) => {
                         updateProgress(platform, status.status, status.review_count);
                     });
+
+                    // 显示最新评论
+                    if (data.results) {
+                        Object.entries(data.results).forEach(([platform, reviews]) => {
+                            reviews.forEach(review => {
+                                if (!document.getElementById(`review-${platform}-${review.timestamp}`)) {
+                                    const reviewElement = document.createElement('div');
+                                    reviewElement.id = `review-${platform}-${review.timestamp}`;
+                                    reviewElement.className = 'mb-2';
+                                    reviewElement.innerHTML = `
+                                        <small class="text-muted">${platform} - ${review.date}</small><br>
+                                        <strong>${review.hotel_name}</strong>: ${review.content}
+                                    `;
+                                    liveResultsContainer.insertBefore(reviewElement, liveResultsContainer.firstChild);
+                                }
+                            });
+                        });
+                    }
+
                     // 继续轮询
                     setTimeout(pollSearchStatus, 2000);
                 }
@@ -270,6 +338,9 @@
             const keyword = document.getElementById('keyword').value.trim();
             const selectedPlatforms = Array.from(document.querySelectorAll('input[type="checkbox"]:checked'))
                                         .map(cb => cb.value);
+            const targetCount = parseInt(document.getElementById('targetCount').value);
+            const startDate = document.getElementById('startDate').value;
+            const endDate = document.getElementById('endDate').value;
 
             if (!keyword) {
                 showStatus('请输入搜索关键词', 'warning');
@@ -281,10 +352,18 @@
                 return;
             }
 
+            if (startDate && endDate && startDate > endDate) {
+                showStatus('起始日期不能晚于结束日期', 'warning');
+                return;
+            }
+
             showLoading();
+            stopBtn.style.display = 'inline-block';
+            liveResults.style.display = 'block';
             totalReviews = 0;
             platformProgressDiv.innerHTML = '';
             resultsDiv.innerHTML = '';
+            liveResultsContainer.innerHTML = '';
 
             try {
                 const response = await fetch('/start_scraping', {
@@ -294,7 +373,10 @@
                     },
                     body: JSON.stringify({ 
                         keyword,
-                        platforms: selectedPlatforms
+                        platforms: selectedPlatforms,
+                        target_count: targetCount,
+                        start_date: startDate,
+                        end_date: endDate
                     })
                 });
 
@@ -308,15 +390,21 @@
                     resetForm();
                 }
             } catch (error) {
-                showStatus(`
-                    发生错误：${error.message}<br>
-                    可能的原因：<br>
-                    1. 网络连接不稳定<br>
-                    2. 服务器暂时不可用<br>
-                    3. 请求超时<br>
-                    请稍后重试
-                `, 'danger');
+                showStatus(`发生错误：${error.message}`, 'danger');
                 resetForm();
+            }
+        };
+
+        // 添加停止搜索功能
+        stopBtn.onclick = async () => {
+            try {
+                const response = await fetch('/stop_scraping', {
+                    method: 'POST'
+                });
+                const data = await response.json();
+                showStatus(data.message, 'warning');
+            } catch (error) {
+                showStatus('停止搜索失败：' + error.message, 'danger');
             }
         };
 
