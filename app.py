@@ -1,14 +1,13 @@
 from flask import Flask, render_template, request, jsonify
-from seleniumwire import webdriver
-from selenium.webdriver.chrome.options import Options
-from selenium.webdriver.chrome.service import Service
-from webdriver_manager.chrome import ChromeDriverManager
+import requests
+from bs4 import BeautifulSoup
 import threading
 import queue
 from proxy_pool import ProxyPool
-from hotel_reviews_scraper import CtripScraper, BookingScraper, AgodaScraper
 import logging
 import os
+import json
+from datetime import datetime
 
 app = Flask(__name__)
 
@@ -23,48 +22,61 @@ scraping_status = {
 
 result_queue = queue.Queue()
 
-def initialize_driver(proxy_pool):
-    """初始化Chrome驱动"""
-    chrome_options = Options()
+class SimpleScraper:
+    def __init__(self, proxy_pool):
+        self.proxy_pool = proxy_pool
+        self.session = requests.Session()
     
-    # Vercel环境特定配置
-    chrome_options.add_argument('--headless')
-    chrome_options.add_argument('--disable-gpu')
-    chrome_options.add_argument('--no-sandbox')
-    chrome_options.add_argument('--disable-dev-shm-usage')
-    chrome_options.add_argument('--disable-extensions')
-    chrome_options.add_argument('--disable-setuid-sandbox')
-    chrome_options.add_argument('--single-process')
-    chrome_options.add_argument(f'--user-agent={proxy_pool.get_headers()["User-Agent"]}')
-    
-    # 配置代理
-    proxy = proxy_pool.get_proxy()
-    seleniumwire_options = {
-        'proxy': proxy,
-        'verify_ssl': False  # 禁用SSL验证以提高性能
-    }
-    
-    try:
-        # 尝试使用 ChromeDriverManager
-        service = Service(ChromeDriverManager().install())
-        driver = webdriver.Chrome(
-            service=service,
-            options=chrome_options,
-            seleniumwire_options=seleniumwire_options
-        )
-    except Exception as e:
-        logging.error(f"使用 ChromeDriverManager 失败: {str(e)}")
-        # 降级使用远程 WebDriver
+    def get_page(self, url):
+        headers = self.proxy_pool.get_headers()
+        proxy = self.proxy_pool.get_proxy()
         try:
-            driver = webdriver.Remote(
-                command_executor='http://localhost:4444/wd/hub',
-                options=chrome_options
+            response = self.session.get(
+                url, 
+                headers=headers, 
+                proxies=proxy,
+                timeout=10
             )
+            return response.text
         except Exception as e:
-            logging.error(f"使用远程 WebDriver 失败: {str(e)}")
-            raise
+            logging.error(f"获取页面失败: {str(e)}")
+            return None
+
+class CtripScraper(SimpleScraper):
+    def scrape(self, keyword, pages=50):
+        reviews = []
+        try:
+            # 使用携程API接口
+            api_url = f"https://m.ctrip.com/restapi/soa2/16709/json/GetSearchResult?keyword={keyword}"
+            data = self.session.post(api_url, headers=self.proxy_pool.get_headers()).json()
+            
+            # 解析酒店列表
+            if 'hotels' in data:
+                for hotel in data['hotels'][:pages]:
+                    hotel_reviews = self._get_hotel_reviews(hotel['hotelId'])
+                    reviews.extend(hotel_reviews)
+            
+            return reviews
+        except Exception as e:
+            logging.error(f"爬取携程失败: {str(e)}")
+            return reviews
     
-    return driver
+    def _get_hotel_reviews(self, hotel_id):
+        reviews = []
+        try:
+            api_url = f"https://m.ctrip.com/restapi/soa2/16765/json/GetReviewList?hotelId={hotel_id}"
+            data = self.session.post(api_url, headers=self.proxy_pool.get_headers()).json()
+            
+            if 'reviews' in data:
+                for review in data['reviews']:
+                    reviews.append({
+                        'hotel_name': data.get('hotelName', ''),
+                        'content': review.get('content', ''),
+                        'date': review.get('reviewDate', '')
+                    })
+        except Exception as e:
+            logging.error(f"获取酒店评论失败: {str(e)}")
+        return reviews
 
 def scraping_worker(keyword, sites, pages_per_site):
     """爬虫工作线程"""
@@ -72,22 +84,21 @@ def scraping_worker(keyword, sites, pages_per_site):
     
     try:
         proxy_pool = ProxyPool()
-        driver = initialize_driver(proxy_pool)
         
         scrapers = {
-            'ctrip': CtripScraper(driver, proxy_pool),
-            'booking': BookingScraper(driver, proxy_pool),
-            'agoda': AgodaScraper(driver, proxy_pool)
+            'ctrip': CtripScraper(proxy_pool),
+            # 其他网站的爬虫实现...
         }
         
         total_reviews = 0
         for site in sites:
             try:
                 scraping_status['current_site'] = site
-                scraper = scrapers[site]
-                reviews = scraper.scrape(keyword, pages_per_site)
-                total_reviews += len(reviews)
-                result_queue.put((site, reviews))
+                if site in scrapers:
+                    scraper = scrapers[site]
+                    reviews = scraper.scrape(keyword, pages_per_site)
+                    total_reviews += len(reviews)
+                    result_queue.put((site, reviews))
                 scraping_status['progress'] = (sites.index(site) + 1) / len(sites) * 100
                 
             except Exception as e:
@@ -100,7 +111,6 @@ def scraping_worker(keyword, sites, pages_per_site):
         scraping_status['error'] = str(e)
     finally:
         scraping_status['is_running'] = False
-        driver.quit()
 
 @app.route('/')
 def index():
@@ -149,11 +159,24 @@ def get_results():
         results[site] = reviews
     return jsonify(results)
 
+@app.errorhandler(Exception)
+def handle_error(error):
+    message = str(error)
+    status_code = 500
+    if hasattr(error, 'code'):
+        status_code = error.code
+    response = {
+        'error': {
+            'message': message,
+            'status_code': status_code
+        }
+    }
+    return jsonify(response), status_code
+
 if __name__ == '__main__':
     logging.basicConfig(
         level=logging.INFO,
         format='%(asctime)s - %(levelname)s - %(message)s'
     )
-    # 根据环境变量决定是否开启debug模式
     debug = os.environ.get('FLASK_ENV') == 'development'
     app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 5000)), debug=debug) 
