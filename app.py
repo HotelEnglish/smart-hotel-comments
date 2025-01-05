@@ -32,21 +32,39 @@ def initialize_driver(proxy_pool):
     chrome_options.add_argument('--disable-gpu')
     chrome_options.add_argument('--no-sandbox')
     chrome_options.add_argument('--disable-dev-shm-usage')
+    chrome_options.add_argument('--disable-extensions')
+    chrome_options.add_argument('--disable-setuid-sandbox')
+    chrome_options.add_argument('--single-process')
     chrome_options.add_argument(f'--user-agent={proxy_pool.get_headers()["User-Agent"]}')
     
     # 配置代理
     proxy = proxy_pool.get_proxy()
     seleniumwire_options = {
-        'proxy': proxy
+        'proxy': proxy,
+        'verify_ssl': False  # 禁用SSL验证以提高性能
     }
     
-    # 使用ChromeDriverManager自动管理driver
-    service = Service(ChromeDriverManager().install())
-    return webdriver.Chrome(
-        service=service,
-        options=chrome_options,
-        seleniumwire_options=seleniumwire_options
-    )
+    try:
+        # 尝试使用 ChromeDriverManager
+        service = Service(ChromeDriverManager().install())
+        driver = webdriver.Chrome(
+            service=service,
+            options=chrome_options,
+            seleniumwire_options=seleniumwire_options
+        )
+    except Exception as e:
+        logging.error(f"使用 ChromeDriverManager 失败: {str(e)}")
+        # 降级使用远程 WebDriver
+        try:
+            driver = webdriver.Remote(
+                command_executor='http://localhost:4444/wd/hub',
+                options=chrome_options
+            )
+        except Exception as e:
+            logging.error(f"使用远程 WebDriver 失败: {str(e)}")
+            raise
+    
+    return driver
 
 def scraping_worker(keyword, sites, pages_per_site):
     """爬虫工作线程"""
