@@ -155,6 +155,16 @@
                         </div>
                     </div>
                 </div>
+
+                <!-- 在结果显示区域添加导出按钮 -->
+                <div id="exportButtons" style="display: none;" class="mb-3">
+                    <button class="btn btn-success me-2" onclick="exportResults('txt')">
+                        导出为TXT
+                    </button>
+                    <button class="btn btn-success" onclick="exportResults('markdown')">
+                        导出为Markdown
+                    </button>
+                </div>
             </div>
         </div>
     </div>
@@ -239,20 +249,37 @@
                 const response = await fetch('/search_status');
                 const data = await response.json();
                 
-                if (data.status === 'completed' || data.current_count >= data.target_count) {
+                if (data.status === 'completed' || 
+                    data.current_count >= data.target_count || 
+                    Object.values(data.platform_status).every(s => 
+                        ['completed', 'stopped', 'timeout', 'error'].includes(s.status)
+                    )) {
                     showStatus('搜索完成！', 'success');
                     searchInProgress = false;
                     stopBtn.style.display = 'none';
+                    document.getElementById('exportButtons').style.display = 'block';
                     displayResults(data.results);
                 } else if (data.status === 'in_progress') {
-                    // 更新进度条
+                    // 更新总进度
                     const progress = (data.current_count / data.target_count) * 100;
                     progressBar.style.width = `${Math.min(progress, 100)}%`;
                     progressBar.textContent = `${Math.round(progress)}%`;
 
-                    // 更新平台状态
+                    // 更新各平台进度
                     Object.entries(data.platform_status).forEach(([platform, status]) => {
                         updateProgress(platform, status.status, status.review_count);
+                        
+                        // 显示平台进度
+                        const platformDiv = document.getElementById(`progress-${platform}`);
+                        if (platformDiv && status.progress !== undefined) {
+                            platformDiv.innerHTML += `
+                                <div class="progress" style="height: 5px;">
+                                    <div class="progress-bar" role="progressbar" 
+                                         style="width: ${status.progress}%">
+                                    </div>
+                                </div>
+                            `;
+                        }
                     });
 
                     // 显示最新评论
@@ -262,10 +289,11 @@
                                 if (!document.getElementById(`review-${platform}-${review.timestamp}`)) {
                                     const reviewElement = document.createElement('div');
                                     reviewElement.id = `review-${platform}-${review.timestamp}`;
-                                    reviewElement.className = 'mb-2';
+                                    reviewElement.className = 'mb-2 border-bottom pb-2';
                                     reviewElement.innerHTML = `
                                         <small class="text-muted">${platform} - ${review.date}</small><br>
-                                        <strong>${review.hotel_name}</strong>: ${review.content}
+                                        <strong>${review.hotel_name}</strong> (${review.score}分)<br>
+                                        ${review.content}
                                     `;
                                     liveResultsContainer.insertBefore(reviewElement, liveResultsContainer.firstChild);
                                 }
@@ -422,6 +450,38 @@
                 showStatus('无法连接到服务器，请刷新页面重试', 'danger');
             }
         };
+
+        // 添加导出功能
+        async function exportResults(format) {
+            try {
+                const response = await fetch('/export', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify({ format })
+                });
+
+                const data = await response.json();
+                
+                if (response.ok) {
+                    // 创建并下载文件
+                    const blob = new Blob([data.content], { type: 'text/plain' });
+                    const url = window.URL.createObjectURL(blob);
+                    const a = document.createElement('a');
+                    a.href = url;
+                    a.download = `hotel_reviews.${format}`;
+                    document.body.appendChild(a);
+                    a.click();
+                    window.URL.revokeObjectURL(url);
+                    document.body.removeChild(a);
+                } else {
+                    showStatus(`导出失败：${data.error}`, 'danger');
+                }
+            } catch (error) {
+                showStatus(`导出失败：${error.message}`, 'danger');
+            }
+        }
     </script>
 </body>
 </html> 

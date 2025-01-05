@@ -62,31 +62,46 @@ def get_search_status():
 def search_platform(platform, keyword, target_count, date_range):
     """在特定平台上搜索"""
     try:
+        start_time = time.time()
+        max_search_time = 300  # 5分钟超时
+        
         search_status['platform_status'][platform] = {
             'status': 'searching',
             'review_count': 0
         }
         
-        start_time = time.time()
-        max_search_time = 300  # 最大搜索时间5分钟
+        # 分批次搜索，每批次检查是否需要停止
+        batch_size = 3
+        total_batches = (target_count + batch_size - 1) // batch_size
         
-        # 模拟搜索过程
-        for i in range(10):  # 分批次搜索
-            if search_status['should_stop'] or \
-               search_status['current_count'] >= target_count or \
-               time.time() - start_time > max_search_time:
-                break
-                
-            # 模拟找到一些评论
+        for batch in range(total_batches):
+            # 检查停止条件
+            if search_status['should_stop']:
+                search_status['platform_status'][platform]['status'] = 'stopped'
+                logging.info(f"{platform} 搜索已停止")
+                return
+            
+            # 检查超时
+            if time.time() - start_time > max_search_time:
+                search_status['platform_status'][platform]['status'] = 'timeout'
+                logging.info(f"{platform} 搜索超时")
+                return
+            
+            # 检查是否达到目标数量
+            if search_status['current_count'] >= target_count:
+                search_status['platform_status'][platform]['status'] = 'completed'
+                return
+            
+            # 模拟获取一批评论
             new_reviews = [
                 {
-                    'hotel_name': f'测试酒店 {i}',
-                    'content': f'这是一条来自{platform}的测试评论 {i}',
+                    'hotel_name': f'测试酒店 {batch * batch_size + i}',
+                    'content': f'这是一条来自{platform}的测试评论 {batch * batch_size + i}',
                     'score': 4.5,
                     'date': datetime.now().strftime('%Y-%m-%d'),
-                    'timestamp': datetime.now().isoformat()  # 用于实时显示
+                    'timestamp': datetime.now().isoformat()
                 }
-                for i in range(3)
+                for i in range(batch_size)
             ]
             
             # 过滤日期范围
@@ -96,22 +111,23 @@ def search_platform(platform, keyword, target_count, date_range):
                     if date_range['start'] <= review['date'] <= date_range['end']
                 ]
             
+            # 更新结果
             if platform not in search_status['results']:
                 search_status['results'][platform] = []
             
             search_status['results'][platform].extend(new_reviews)
             search_status['current_count'] += len(new_reviews)
-            search_status['platform_status'][platform] = {
+            
+            # 更新进度
+            search_status['platform_status'][platform].update({
                 'status': 'searching',
-                'review_count': len(search_status['results'][platform])
-            }
+                'review_count': len(search_status['results'][platform]),
+                'progress': min(100, (batch + 1) * 100 // total_batches)
+            })
             
             time.sleep(1)  # 模拟搜索延迟
         
-        search_status['platform_status'][platform] = {
-            'status': 'completed',
-            'review_count': len(search_status['results'][platform])
-        }
+        search_status['platform_status'][platform]['status'] = 'completed'
         
     except Exception as e:
         logging.error(f"{platform} 搜索失败: {str(e)}")
@@ -191,6 +207,45 @@ def internal_error(error):
 def handle_exception(e):
     logging.error(f"未处理的异常: {str(e)}")
     return jsonify({'error': str(e)}), 500
+
+@app.route('/export', methods=['POST'])
+def export_results():
+    try:
+        data = request.get_json()
+        format_type = data.get('format', 'txt')
+        
+        if format_type not in ['txt', 'markdown']:
+            return jsonify({'error': '不支持的导出格式'}), 400
+        
+        content = ''
+        if format_type == 'txt':
+            for platform, reviews in search_status['results'].items():
+                content += f"\n=== {platform} ===\n\n"
+                for review in reviews:
+                    content += f"酒店：{review['hotel_name']}\n"
+                    content += f"评分：{review['score']}\n"
+                    content += f"日期：{review['date']}\n"
+                    content += f"评论：{review['content']}\n"
+                    content += "-" * 50 + "\n"
+        else:  # markdown
+            content = "# 酒店评论搜索结果\n\n"
+            for platform, reviews in search_status['results'].items():
+                content += f"## {platform}\n\n"
+                for review in reviews:
+                    content += f"### {review['hotel_name']}\n\n"
+                    content += f"- 评分：{review['score']}\n"
+                    content += f"- 日期：{review['date']}\n"
+                    content += f"- 评论：{review['content']}\n\n"
+                    content += "---\n\n"
+        
+        return jsonify({
+            'status': 'success',
+            'content': content
+        })
+        
+    except Exception as e:
+        logging.error(f"导出结果失败: {str(e)}")
+        return jsonify({'error': str(e)}), 500
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
