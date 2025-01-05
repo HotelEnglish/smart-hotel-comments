@@ -1,4 +1,5 @@
 from flask import Flask, render_template, request, jsonify
+from werkzeug.urls import url_quote
 import logging
 import os
 
@@ -9,6 +10,11 @@ logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(message)s'
 )
+
+# 添加健康检查端点
+@app.route('/_health')
+def health_check():
+    return jsonify({'status': 'healthy'}), 200
 
 @app.route('/')
 def index():
